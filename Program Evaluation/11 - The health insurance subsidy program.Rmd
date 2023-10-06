@@ -1,0 +1,499 @@
+---
+title: "Problem set 8: The Health Insurance Subsidy Program"
+date: "21 September 2023"
+output: 
+  html_document: 
+    toc: yes
+  pdf_document: 
+    latex_engine: xelatex
+    toc: yes
+  word_document: 
+    toc: yes
+editor_options: 
+  chunk_output_type: console
+---
+
+---
+
+```{r setup, warning=FALSE, message=FALSE}
+library(tidyverse)
+library(broom)
+library(estimatr)
+library(modelsummary)
+library(MatchIt)
+library(rdrobust)
+library(rddensity)
+library(haven)
+library(kableExtra)
+
+set.seed(1234)  # Make any random stuff be the same every time you run this
+
+# Round everything to 3 digits by default
+options("digits" = 3)
+
+# Turn off the message that happens when you use group_by() and summarize()
+options(dplyr.summarise.inform = FALSE)
+
+# Load raw data
+hisp_raw <- read_stata("data/evaluation.dta")
+
+# Make nice clean dataset to use for the rest of the assignment
+hisp <- hisp_raw %>% 
+  rename(enroled = enrolled,
+         enroled_rp = enrolled_rp) %>% 
+  # Having a numeric 0/1 column is sometimes helpful for things that don't like
+  # categories, like matchit()
+  mutate(enroled_num = enroled) %>% 
+  # Convert these 0/1 values to actual categories
+  mutate(eligible = factor(eligible, labels = c("Not eligible", "Eligible")),
+         enroled = factor(enroled, labels = c("Not enroled", "enroled")),
+         round = factor(round, labels = c("Before", "After")),
+         treatment_locality = factor(treatment_locality, labels = c("Control", "Treatment")),
+         promotion_locality = factor(promotion_locality, labels = c("No promotion", "Promotion"))) %>% 
+  # Get rid of this hospital column because (1) we're not using it, and (2) half
+  # of the households are missing data, and matchit() complains if any data is
+  # missing, even if you're not using it
+  select(-hospital)
+```
+
+
+The World Bank's *Impact Evaluation in Practice* has used a hypothetical example of a health insurance program throughout the book. This Health Insurance Subsidy Program (HISP) provides subsidies for buying private health insurance to poorer households, with the goal of lowering personal health expenditures, since people can rely on insurance coverage instead of paying out-of-pocket. Think of the HISP as a version of the Affordable Care Act (ACA, commonly known as Obamacare).
+
+The dataset includes a number of important variables you'll use throughout this assignment:
+
+| Variable name         | Description                                                      |
+| --------------------- | ---------------------------------------------------------------- |
+| `health_expenditures` | Out of pocket health expenditures (per person per year)          |
+| `eligible`            | Household eligible to enrol in HISP                             |
+| `enroled`             | Household enroled in HISP                                       |
+| `round`               | Indicator for before and after intervention                      |
+| `treatment_locality`  | Household is located in treatment community                      |
+| `poverty_index`       | 1-100 scale of poverty                                           |
+| `promotion_locality`  | Household is located in community that received random promotion |
+| `enroled_rp`          | Household enroled in HISP following random promotion            |
+
+
+It also includes several demographic variables about the households. **Each of these are backdoor confounders between health expenditures participation in the HISP**:
+
+| Variable name       | Description                                               |
+| ------------------- | --------------------------------------------------------- |
+| `age_hh`            | Age of the head of household (years)                      |
+| `age_sp`            | Age of the spouse (years)                                 |
+| `educ_hh`           | Education of the head of household (years)                |
+| `educ_sp`           | Education of the spouse (years)                           |
+| `female_hh`         | Head of household is a woman (1 = yes)                    |
+| `indigenous`        | Head of household speaks an indigenous language (1 = yes) |
+| `hhsize`            | Number of household members                               |
+| `dirtfloor`         | Home has a dirt floor (1 = yes)                           |
+| `bathroom`          | Home has a private bathroom (1 = yes)                     |
+| `land`              | Number of hectares of land owned by household             |
+| `hospital_distance` | Distance to closest hospital (km)                         |
+
+
+You will use each of the five main econometric approaches for estimating causal effects to measure the effect of HISP on household health expenditures. **Don't worry about conducting in-depth baseline checks and robustness checks.** For the sake of this assignment, you'll do the minimum amount of work for each method to determine the causal effect of the program.
+
+
+# Task 1: RCTs
+
+To measure the effect of HISP accurately, World Bank researchers randomly assigned different localities (villages, towns, cities, whatever) to treatment and control groups. Some localities were allowed to join HISP; others weren't.
+
+Here's what you should do:
+
+- Make a new dataset that only looks at eligible households (`filter(eligible == "Eligible")`)
+- Make a new dataset that only looks at eligible households *after* the experiment (`filter(round == "After")`)
+- Calculate the average health expenditures in treatment and control localities (`treatment_locality`) *before* the intervention (`round == "Before"`). Were expenditures fairly balanced across treatment and control groups before the intervention?
+- Calculate the average health expenditures in treatment and control localities *after* the intervention (`round == "After"`)
+- Determine the difference in average health expenditures across treatment and control *after* the intervention
+- Using data *after* the intervention, use linear regression to determine the difference in means and statistical significance of the difference (hint: you'll want to use `health_expenditures ~ treatment_locality`). Use `lm_robust()` from the **estimatr** package and cluster by `locality_identifier` if you're feeling adventurous. 
+- Create another model that controls for the following variables: `age_hh + age_sp + educ_hh + educ_sp + female_hh + indigenous + hhsize + dirtfloor + bathroom + land + hospital_distance`. (Use `lm_robust()` again if you're brave.) Does the estimate of the causal effect change?
+- Show the results from the two regressions in a side-by-side table if you want
+
+```{r}
+# create datasets of eligible households
+hisp_eligible <- hisp %>% filter(eligible == "Eligible")
+hisp_eligible_after <- hisp_eligible %>% filter(round == "After")
+
+# calculate the average expenditure before the intervention
+hisp_eligible %>% 
+  filter(round == "Before") %>% 
+  group_by(treatment_locality) %>% 
+  summarise(n = n(),
+            avg_exp = mean(health_expenditures))
+```
+
+Health expenditures were pretty much the same before the intervention in the treatment and control groups.
+
+```{r}
+# calculate the average expenditure after the intervention
+hisp_eligible %>% 
+  filter(round == "After") %>% 
+  group_by(treatment_locality) %>% 
+  summarise(n = n(),
+            avg_exp = mean(health_expenditures))
+```
+
+The estimate of the causal effect doesn't really change when the controls are included.
+
+```{r}
+model_rct <- lm_robust(health_expenditures ~ treatment_locality, data = hisp_eligible_after,
+                       clusters = locality_identifier)
+
+model_rct2 <- lm_robust(health_expenditures ~ treatment_locality + age_hh + age_sp + educ_hh + 
+                          educ_sp + female_hh + indigenous + hhsize + dirtfloor + bathroom + 
+                          land + hospital_distance,
+                        data = hisp_eligible_after, clusters = locality_identifier)
+
+modelsummary(list("Model" = model_rct,
+                  "Model with controls" = model_rct2
+                  ),
+             gof_omit = "IC|Log|Adj|p\\.value|statistic|se_type",
+             stars = TRUE) %>% 
+  row_spec(c(3), background = "steelblue")
+```
+
+# Task 2: Inverse probability weighting and/or matching
+
+Instead of using experimental data, we can estimate the causal effect using observational data alone by closing all the confounding backdoors. In this task, you should **choose one of two approaches**: inverse probability weighting or matching.
+
+Do the following (for both approaches):
+
+- Make a dataset based on `hisp` that only includes observations from after the intervention (`round == "After"`). Even though you technically have a column that indicates if the household was in the treatment group (`treatment_locality`), you're going to pretend that you don't have it. This is now observational data—all you know is that a bunch of households participated in HISP and a bunch didn't. 
+- Run a naive model that estimates the effect of HISP enrolment on health expenditures (`health_expenditures ~ enroled`) using this after-only observational data. What is the effect? Is this accurate? Why or why not?
+
+```{r}
+hisp_after <- hisp %>% filter(round == "After")
+
+model_naive <- lm(health_expenditures ~ enroled, data = hisp_after)
+tidy(model_naive)
+glance(model_naive)
+```
+
+This model is highly statistically significant and is close to the lm_robust model without any controls, but I still wouldn't trust it as it doesn't account for any selection bias.
+
+***If you're using inverse probability weighting***, do the following:
+
+- Use logistic regression to model the probability of enroling in the HISP. Hint: you'll need to use `glm()` (replace stuff in `<>` like `<THINGS>` with actual column names or dataset names). Also, note that this code below isn't in an actual R chunk, so don't try to run it.
+
+```r
+model_logit <- glm(enroled ~ COUNFOUNDER1 + COUNFOUNDER2 + ...,
+                   data = NAME_OF_YOUR_AFTER_DATASET,
+                   family = binomial(link = "logit"))
+```
+
+- Generate propensity scores for enrolment in the HISP using something like this code (again, this isn't a chunk; don't try to run it):
+
+```r
+enroled_propensities <- augment_columns(MODEL_NAME, NAME_OF_YOUR_AFTER_DATASET, 
+                                         type.predict = "response") %>% 
+  rename(p_enroled = .fitted)                                         
+```
+
+- Add a new column to `enroled_propensities` with `mutate()` that calculates the inverse probability weights using this formula:
+
+$$
+\frac{\text{Treatment}}{\text{Propensity}} + \frac{1 - \text{Treatment}}{1 - \text{Propensity}}
+$$
+
+- Run a model that estimates the effect of HISP enrolment on health expenditures (`health_expenditures ~ enroled`) using the `enroled_propensities` data, weighting by your new inverse probability weights column. What is the causal effect of HISP on health expenditures? How does this compare to the naive model? Which do you believe more? Why?
+- Show the results from the two regressions in a side-by-side table if you want 
+
+```{r}
+# build a model predicting enrolement as a function of the confounders
+model_logit <- glm(enroled ~ age_hh + age_sp + educ_hh + educ_sp + female_hh + 
+                     indigenous + hhsize + dirtfloor + bathroom + land + hospital_distance,
+                   data = hisp_after, family = binomial(link = "logit"))
+# generate predicted probabilities of enrolement
+enroled_propensities <- augment_columns(model_logit, hisp_after,
+                                        type.predict = "response") %>% 
+  rename(propensity = .fitted)
+# add the inverse probability weights
+enroled_propensities <- enroled_propensities %>% 
+  mutate(ipw = (enroled_num / propensity) + ((1 - enroled_num) / (1 - propensity)))
+# estimate the effect of enrolement on health expenditure
+model_ipw <- lm(health_expenditures ~ enroled, data = enroled_propensities, weights = ipw)
+```
+
+So, the causal effect estimate is overstated in the naive model. But even if we didn't know the true effect, I'd still trust the estimate from the IPTW model over the naive estimate because it's a proven methodology to isolate the effect of the intervention on the outcome of interest.
+
+```{r}
+modelsummary(list("True model" = model_rct,
+                  # "True model with controls" = model_rct2,
+                  "Naive model" = model_naive,
+                  "IPTW" = model_ipw
+                  ),
+             gof_omit = "IC|Log|Adj|p\\.value|statistic|se_type",
+             stars = TRUE) %>% 
+    row_spec(c(3, 5), background = "steelblue")
+```
+
+***If you're using matching***, do the following:
+
+- Use `matchit()` to find the best matches for enrolment based on Mahalanobis nearest neighbor matching. The `matchit()` function can't work with categorical variables, so make sure you use `enroled_num` instead of `enroled`. Use code similar to this (replace stuff in `<>` like `<THINGS>` with actual column names or dataset names). Also, note that this code below isn't in an actual R chunk, so don't try to run it.
+
+```r
+matched <- matchit(enroled_num ~ COUNFOUNDER1 + COUNFOUNDER2 + ..., 
+                   data = NAME_OF_YOUR_AFTER_DATASET,
+                   method = "nearest", distance = "mahalanobis", replace = TRUE)
+```
+
+- Run `summary(matched)` and see how many rows were matched and how many will be discarded.
+- Use `match.data()` to store the results of the match as a new dataset.
+- Run a model that estimates the effect of HISP enrolment on health expenditures (`health_expenditures ~ enroled`) using the matched data, weighting by the `weights` column that `matchit()` generated. What is the causal effect of HISP on health expenditures? How does this compare to the naive model? Which do you believe more? Why?
+- Show the results from the two regressions in a side-by-side table if you want 
+
+```{r}
+# match similar observations together based on enrolement
+matched <- matchit(enroled_num ~ age_hh + age_sp + educ_hh + educ_sp + female_hh + indigenous + 
+                     hhsize + dirtfloor + bathroom + land + hospital_distance, data = hisp_after,
+                   method = "nearest", distance = "mahalanobis", replace = TRUE)
+summary(matched)
+```
+
+The output indicates that all enroled households were retained, but only 2,051 non-enroled households (4,898 households were discarded).
+
+```{r}
+# extract the results as a new dataset
+hisp_after_matched <- match.data(matched)
+# estimate the effect of enrolement on health expenditure
+model_matched <- lm(health_expenditures ~ enroled, data = hisp_after_matched, weights = weights)
+```
+
+The causal effect estimate is actually understated using matching (compared to being overstated in the IPTW model), but either way I'd again choose the matched model over the naive model for similar reasons.
+
+```{r}
+modelsummary(list("True model" = model_rct,
+                  # "True model with controls" = model_rct2,
+                  "Naive model" = model_naive,
+                  "IPTW" = model_ipw,
+                  "Matched" = model_matched
+                  ),
+             gof_omit = "IC|Log|Adj|p\\.value|statistic|se_type",
+             stars = TRUE) %>% 
+    row_spec(c(3, 5), background = "steelblue")
+```
+
+# Task 3: Diff-in-diff
+
+Instead of using experimental data, we can estimate the causal effect using observational data alone with a difference-in-difference approach. We have data indicating if households were enroled in the program (`enroled`) and data indicating if they were surveyed before or after the intervention (`round`), which means we can find the differences between enroled/not enroled before and after the program.
+
+Do the following:
+
+- Make a new dataset based on `hisp` that only includes observations from the localities that were randomly chosen for treatment (`treatment_locality == "Treatment"`)
+- Using that new dataset, run a regression model that estimates the difference-in-difference effect of being enroled in the HISP program. Use `lm_robust()` and cluster by `locality_identifier` if you're brave. What is the causal effect of HISP on health expenditures?
+- Run a second model that estimates the difference-in-difference effect, but control for the following variables: `age_hh + age_sp + educ_hh + educ_sp + female_hh + indigenous + hhsize + dirtfloor + bathroom + land + hospital_distance`. (Again, cluster by `locality_identifier` if you're brave.) How does the causal effect change?
+- Show the results from the two regressions in a side-by-side table if you want
+
+```{r}
+# filter for treated localities
+hisp_treatment <- hisp %>% filter(treatment_locality == "Treatment")
+
+# estimate the DiD effect of being enroled in the HISP program
+model_did <- lm_robust(health_expenditures ~ enroled + round + enroled * round,
+                       data = hisp_treatment, clusters = locality_identifier)
+tidy(model)
+```
+
+The diff-in-diff estimate is -8.16, which implies that the HISP program caused health expenditures to decrease by $8.16 on average. This effect is statistically significant.
+
+```{r}
+# estimate the causal effect again but with additional controls
+model_did2 <- lm_robust(health_expenditures ~ enroled + round + enroled * round + age_hh + age_sp + 
+                          educ_hh + educ_sp + female_hh + indigenous + hhsize + dirtfloor + 
+                          bathroom + land + hospital_distance, data = hisp_treatment,
+                        clusters = locality_identifier)
+tidy(model2)
+```
+
+The causal effect is remarkably similar to before and still statistically significant.
+
+```{r}
+modelsummary(list("True model" = model_rct,
+                  # "True model with controls" = model_rct2,
+                  "Naive model" = model_naive,
+                  "IPTW" = model_ipw,
+                  "Matched" = model_matched,
+                  "Difference-in-differences" = model_did
+                  # "Difference-in-differences with controls" = model_did2
+                  ),
+             gof_omit = "IC|Log|Adj|p\\.value|statistic|se_type",
+             stars = TRUE) %>% 
+    row_spec(c(3, 5, 9), background = "steelblue")
+```
+
+# Task 4: RDD
+
+Eligibility for the HISP is determined by income. Households that have an income of less than 58 on a standardized 1-100 scale (`poverty_index`) qualify for the program and are automatically enroled. Because we have an arbitrary cutoff in a running variable, we can use regression discontinuity to measure the effect of the program on health expenditures.
+
+Do the following:
+
+- Make a new dataset based on `hisp` that only includes observations from the localities that were randomly chosen for treatment (`treatment_locality == "Treatment"`)
+- Use `mutate()` to add new variable that centres the poverty index variable at 58
+- Determine if the discontinuity is sharp or fuzzy.
+- Determine if the distribution of the running variable (`poverty_index`) has a jump near the cut-off (it shouldn't).
+- Visualize the jump in outcome at the cut-off with a scatterplot
+- Graphically, does it look like the HISP reduces health expenditures?
+- Build a parametric regression model to estimate the size of the gap at the cut-off. You'll want to use the centred policy index variable to make it easier to interpret. You probably want to create a new dataset that only includes observations within some bandwidth that you choose (`filter(poverty_index_centered >= SOMETHING & poverty_index_centered <= SOMETHING)`). How big is the effect?
+- Use `rdrobust()` from the **rdrobust** library to estimate the size of the gap non-parametrically. For the sake of simplicity, just use the default (automatic) bandwidth and kernel. How big is the effect?
+
+```{r}
+# centre the poverty index variable
+hisp_treatment <- hisp_treatment %>% mutate(poverty_index_centred = poverty_index - 58)
+
+# determine if the discontinuity is sharp or fuzzy
+hisp_treatment %>% 
+  ggplot(aes(x = poverty_index, y = enroled, colour = enroled)) +
+  geom_point(size = 2.5, alpha = 0.5,
+             position = position_jitter(width = 0, height = 0.25, seed = 1234)) +
+  geom_vline(xintercept = 58) +
+  labs(x = "Poverty index", y = "Enroled in HISP") +
+  guides(colour = "none") +
+  theme_classic()
+```
+
+The chart indicates that the discontinuity is sharp.
+
+```{r}
+# determine if the running variable distribution has a jump near the cut-off
+hisp_treatment %>% 
+  ggplot(aes(x = poverty_index, fill = enroled)) +
+  geom_histogram(binwidth = 2, colour = "white", boundary = 58) +
+  geom_vline(xintercept = 58) +
+  labs(x = "Poverty index", y = "Count", fill = "HISP program") +
+  theme_classic()
+
+# use a McCrary test to confirm the result
+test_density <- rddensity(hisp_treatment$poverty_index, c = 58)
+summary(test_density)
+
+plot_density_test <- rdplotdensity(rdd = test_density,
+                                   X = hisp_treatment$poverty_index,
+                                   type = "both")
+```
+
+There is no indication of a jump near the cut-off for the running variable (`poverty_index`).
+
+```{r}
+# visualise the jump in health expenditure at the cut-off
+ggplot(hisp_treatment, aes(x = poverty_index, y = health_expenditures, colour = enroled)) +
+  geom_point(size = 1.5, alpha = 0.5) +
+  geom_smooth(data = filter(hisp_treatment, poverty_index < 58), method = "lm") +
+  geom_smooth(data = filter(hisp_treatment, poverty_index >= 58), method = "lm") +
+  geom_vline(xintercept = 58) +
+  labs(x = "Poverty index", y = "Health expenditure", colour = "Enroled in HISP program") +
+  theme_classic()
+```
+
+It looks as though the HISP program reduced health expenditure at the cut-off.
+
+```{r}
+# estimate the size of the gap at the cut-off using a parametric regression
+model_rdd <- lm(health_expenditures ~ poverty_index_centred + enroled,
+                data = hisp_treatment)
+tidy(model_rdd)
+
+model_rdd_bw5 <- lm(health_expenditures ~ poverty_index_centred + enroled,
+                    data = filter(hisp_treatment, poverty_index_centred >= -5 & poverty_index_centred <= 5))
+tidy(model_rdd_bw5)
+
+model_rdd_bw10 <- lm(health_expenditures ~ poverty_index_centred + enroled,
+                     data = filter(hisp_treatment, poverty_index_centred >= -10 & poverty_index_centred <= 10))
+tidy(model_rdd_bw10)
+
+modelsummary(list("Full data" = model_rdd,
+                  "Bandwidth = 10" = model_rdd_bw5,
+                  "Bandwidth = 5" = model_rdd_bw10
+                  ),
+             gof_omit = "IC|Log|Adj|p\\.value|statistic|se_type",
+             stars = TRUE) %>% 
+    row_spec(5, background = "steelblue")
+
+```
+
+Three regressions were run: first with the entire dataset, second with a bandwidth of 5 and third with a bandwidth of 10. The estimates vary from -7.2 for the full dataset, to -6.8 when a bandwidth of 5 is used. But in all cases, the parametric RDD approach confirms that the HISP program reduces health expenditure.
+
+```{r}
+# estimate the size of the gap at the cut-off using a non-parametric regression
+rdrobust(y = hisp_treatment$health_expenditures, x = hisp_treatment$poverty_index, c = 58) %>% 
+  summary()
+```
+
+The non-parametric approach with a default bandwidth (6.4) and kernel (Triangular) estimates the causal effect to be a decrease in $10.8, which is much larger than the parametric approach and closer to the known true impact.
+
+# Task 5: IVs/2SLS
+
+Finally, we can use an instrument to remove the endogeneity from the choice to enrol in the HISP and estimate the causal effect from observational data. As you read in chapter 5, World Bank evaluators randomly selected households to receive encouragement to enrol in HISP. You can use this encouragement as an instrument for enrolment.
+
+Do the following:
+
+- Create a dataset based on `hisp` that only includes observations from after the intervention (`round == "After"`)
+- Build a naive regression model that estimates the effect of HISP enrolment on health expenditures. You'll need to use the `enroled_rp` variable instead of `enroled`, since we're measuring enrolment after the encouragement intervention. What does this naive model tell us about the effect of enroling in HISP?
+- Check the relevance, exclusion, and exogeneity of promotion (`promotion_locality`) as an instrument. For relevance, you'll want to run a model that predicts enrolment based on promotion (hint: `enroled_rp ~ promotion_locality`) and check (1) the significance of the coefficient and (2) the F-statistic. For exclusion and exogeneity, you'll have to tell a convincing story that proves promotion influences health expenditures *only through* HISP enrolment.
+- Run a 2SLS regression model with promotion as the instrument. You can do this by hand if you want (i.e. run a first stage model, extract predicted enrolment, and use predicted enrolment as the second stage), *or* you can just use the `iv_robust()` function from the **estimatr** library. After removing the endogeneity from enrolment, what is the casual effect of enrolment in the HISP on health expenditures?
+- Show the results from the two regressions in a side-by-side table if you want
+
+```{r}
+# esimate a naive regression
+model_naive2 <- lm(health_expenditures ~ enroled_rp, data = hisp_after)
+tidy(model_naive2)
+glance(model_naive2)
+```
+
+This naive model indicates that enroling in the HISP program reduces health expenditure by $12.7 and the effect is statistically significant.
+
+- Check the relevance, exclusion, and exogeneity of promotion (`promotion_locality`) as an instrument. For relevance, you'll want to run a model that predicts enrolment based on promotion (hint: `enroled_rp ~ promotion_locality`) and check (1) the significance of the coefficient and (2) the F-statistic. For exclusion and exogeneity, you'll have to tell a convincing story that proves promotion influences health expenditures *only through* HISP enrolment.
+
+The proposed instrument is promotion as measured by `promotion_locality`.
+
+| `promotion_locality`  | Household is located in community that received random promotion |
+| `enroled_rp`          | Household enroled in HISP following random promotio
+
+- **Relevance**: Instrument is correlated with policy variable. Households that are located in communities in which the HISP program is promoted are more likely to enrol in the program.
+
+```{r}
+model_check_instrument <- lm(enroled_rp ~ promotion_locality, data = hisp_after)
+tidy(model_check_instrument)
+glance(model_check_instrument)
+```
+
+There appears to be a statistically significance relationship between the proposed instrument and the F-statistic for the model is far higher than the conservative threshold of 104.
+
+- **Exclusion**: Health expenditure in a community is independent of whether or not the HISP program is promoted in the community except when the household enrols in the program. This could be a reasonable claim and there isn't any strong visual evidence of a relationship between the instrument and the outcome.
+
+```{r}
+model_check_instrument <- lm(health_expenditures ~ promotion_locality, data = hisp_after)
+tidy(model_check_instrument)
+glance(model_check_instrument)
+
+ggplot(hisp_after, aes(x = promotion_locality, y = health_expenditures)) +
+  geom_point(alpha = 0.5, position = position_jitter(width = 0.25, height = 0, seed = 1234)) +
+  geom_smooth(method = "lm") +
+  theme_classic()
+```
+
+- **Exogeneity**: Instrument isn’t correlated with anything else in the model (i.e. omitted variables). Whether or not the HISP program is promoted in a community isn't correlated to any other variable in the dataset. Theoretically, this should be reasonable as the promotion is meant to be random, but if a human did the choosing, they might find it hard not to be biased towards communities with higher poverty scores, or other signs of being a lower socio-economic community.
+
+```{r}
+model_2sls <- iv_robust(health_expenditures ~ enroled_rp | promotion_locality,
+                        data = hisp_after, diagnostics = TRUE)
+tidy(model_2sls)
+```
+
+The model indicates that the HISP program reduces health expenditure by $9.5 on average.
+
+# Task 6: Summary
+
+```{r}
+modelsummary(list("True model" = model_rct,
+                  "Naive model" = model_naive,
+                  "IPTW" = model_ipw,
+                  "Matched" = model_matched,
+                  "Difference-in-differences" = model_did,
+                  "Parametric RDD model" = model_rdd_bw5,
+                  "2SLS model" = model_2sls
+                  ),
+             gof_omit = "IC|Log|Adj|p\\.value|statistic|se_type",
+             stars = TRUE) %>% 
+    row_spec(c(3, 5, 9, 13), background = "steelblue")
+```
+
+Overall, it appears that the IPTW and the matching models got closest to the true effect. However, in the absence of knowing that, the believability of the diff-in-diff and/or instrumental variable model would depend on how much you trust the selected counterfactual group in the case of the former and the justifiability of the instrument in the case of the latter.

@@ -1,0 +1,331 @@
+---
+title: "Problem set 7: Education and wages + public housing and health"
+date: "18 September 2023"
+output: 
+  html_document: 
+    toc: yes
+  pdf_document: 
+    latex_engine: xelatex
+    toc: yes
+  word_document: 
+    toc: yes
+editor_options: 
+  chunk_output_type: console
+---
+
+---
+
+```{r setup, warning=FALSE, message=FALSE}
+library(tidyverse)
+library(broom)
+library(estimatr)
+library(modelsummary)
+library(gridExtra)
+```
+
+# Task 1: Education, wages, and kids
+
+Let's look once again at the effect of education on earnings. You'll use data from the 1976 Current Population Survey run by the US Census. The data is available as `wage` in the **wooldridge** R package---here I've just taken a subset of variables and renamed them. There are three columns:
+
+| Variable name  | Description                                | 
+| -------------- | ------------------------------------------ |
+| `wage`         | Average hourly earnings (in 1976 dollars)  |
+| `education`    | Years of education                         |
+| `n_kids`       | Number of dependents living at home        |
+
+You're interested in estimating $\beta_1$ in:
+
+$$
+\text{Wage}_i = \beta_0 + \beta_1 \text{Education}_i + \epsilon_i
+$$
+
+However, there is an issue with omitted variable bias and endogeneity. Instrumental variables can potentially help address the endogeneity.
+
+## Step 1
+
+Load and look at the dataset
+
+```{r load-wage-data, message=FALSE}
+wages <- read_csv("data/wages.csv")
+```
+
+## Step 2
+
+We need an instrument for education, since part of it is endogenous. Do you think the variable `n_kids` (the number of children) would be a valid instrument? Does it meet the three requirements of a valid instrument?
+
+Explain why it passes or fails each of the three requirements for a valid instrument. Test the requirements where possible using scatterplots and regression.
+
+- **Relevance**: Instrument is correlated with policy variable. People who have more dependents living at home would have fewer years of education as the mother at least would have had to spend more time away from a job to raise and look after them.
+
+```{r}
+# Combine father's and mother's education into one column so we can plot both at the same time
+ggplot(wages, aes(x = n_kids, y = education)) +
+  geom_point(alpha = 0.2) +
+  geom_smooth(method = "lm") +
+  theme_classic()
+```
+
+```{r}
+model_check_instrument <- lm(education ~ n_kids, data = wages)
+tidy(model_check_instrument)
+glance(model_check_instrument)
+```
+
+There appears to be a statistically significance relationship between the proposed instrument, but it looks less strong in a plot and the F-statistic fore the model is 25.5. This is higher than the threshold of 10, but far lower than the other proposed threshold of 104, so I'd argue that the relevancy of the instrument is debateable.
+
+- **Exclusion**: Instrument is correlated with outcome only through the policy variable. The number of dependents at home has no direct affect on wages, except through years of education. I'd argue that this is very debatable as having children contains to some extent (and rightly or wrongly) what you earn. For example, being unable to spend long nights at the office to secure a promotion or a bonus.
+
+```{r}
+ggplot(wages, aes(x = n_kids, y = wage)) +
+  geom_point(alpha = 0.5) +
+  geom_smooth(method = "lm") +
+  theme_classic()
+```
+
+- **Exogeneity**: Instrument isn’t correlated with anything else in the model (i.e. omitted variables). The number of dependents at home is not related at all to years of education or wages earned. I find it very hard to come up with a sensible argument for this claim.
+
+Overall, I have to conclude that the proposed instrument fails all three criterion for being a valid instrument to estimate the causal impact of education on wages.
+
+## Step 3
+
+Assume that the number of children is a valid instrument (regardless of whatever you concluded earlier). Using the number of children (`n_kids`) as an instrument for education (`education`), estimate the effect of education on wages via two-stage least squares (2SLS) instrumental variables (IV).
+
+Do this by hand: create a first stage model, extract the predicted education, and use predicted education in the second stage.
+
+Interpret the coefficient that gives the effect of education on wages ($\beta_1$) and its significance.
+
+```{r}
+first_stage <- lm(education ~ n_kids, data = wages)
+wage_w_preds <- augment_columns(first_stage, wages) %>% rename(education_pred = .fitted)
+second_stage <- lm(wage ~ education_pred, data = wage_w_preds)
+tidy(second_stage)
+```
+
+The coefficient on `education_pred` should be the causal effect, and indicates that each year of additional education adds 33.3% to a person's wage. However, it's not statistically significant, so maybe education doesn't have any effect on wages?
+
+(Remember that you can also use the `iv_robust()` function from the **estimatr** package to run IV/2SLS models in one step with: `iv_robust(y ~ x | z, data = data)`, where `y` is the outcome, `x` is the policy/program, and `z` is the instrument. Try doing this to check your manual two-stage model.)
+
+```{r}
+model_2sls <- iv_robust(wage ~ education | n_kids, data = wages, diagnostics = TRUE)
+tidy(model_2sls)
+```
+
+## Step 4
+
+Run a naive model predicting the effect of education on wages (i.e. without any instruments). How does this naive model compare with the IV model? 
+
+```{r}
+model_naive <- lm(wage ~ education, data = wages)
+tidy(model_naive)
+```
+
+Show the results side-by-side here:
+
+```{r}
+modelsummary(list("OLS" = model_naive,
+                  "2SLS (by hand)" = second_stage,
+                  "2SLS (automatic)" = model_2sls),
+             gof_omit = "IC|Log|Adj|p\\.value|statistic|se_type",
+             stars = TRUE) %>%
+  # Add a background color to rows 3 and 5
+  row_spec(c(3, 5), background = "#F5ABEA")
+```
+
+## Step 6
+
+Explain which estimates (OLS vs. IV/2SLS) you would trust more (or why you distrust both)
+
+Whilst I'd believe the 2SLS results over the naive model, I still wouldn't believe the 2SLS results given that I don't think `n_kids` is a valid instrument.
+
+---
+
+
+# Task 2: Public housing and health
+
+[Economic research shows](https://dx.doi.org/10.1002/pam.20288) that there is a potential (albeit weak) connection between health outcomes and residency in public housing. You are interested in finding the effect of public housing assistance on health outcomes. In the absence of experimental data, you must use observational data collected by the Georgia Department of Public Health. You have access to a dataset of 1,000 rows with the following columns:
+
+| Variable name         | Description                                                                      |
+| --------------------- | -------------------------------------------------------------------------------- |
+| `HealthStatus`        | Health status on a scale from 1 = poor to 20 = excellent                         |
+| `HealthBehaviour`      | Omitted variable (you can't actually measure this!)                              |
+| `PublicHousing`       | Number of years spent in public housing                                          |
+| `Supply`              | Number of available public housing units in the city per 100 eligible households |
+| `ParentsHealthStatus` | Health status of parents on a scale from 1 = poor to 20 = excellent              |
+| `WaitingTime`         | Average waiting time before obtaining public housing in the city (in months)     |
+| `Stamp`               | Dollar amount of food stamps (SNAP) spent each month                             |
+| `Age`                 | Age                                                                              |
+| `Race`                | Race; 1 = White, 2 = Black, 3 = Hispanic, 4 = Other                              |
+| `Education`           | Education; 1 = Some high school, 2 = High school, 3 = Bachelor's, 4 = Master's   |
+| `MaritalStatus`       | Marital status; 1 = Single, 2 = Married, 3 = Widow, 4 = Divorced                 |
+
+
+(This is simulated data, but it's based on analysis by [Angela R. Fertig and David A. Reingold](https://dx.doi.org/10.1002/pam.20288))
+
+Your goal is to measure the effect of living in public housing (`PublicHousing`) on health (`HealthStatus`). There is omitted variable bias, though, since people who care more about their health might be more likely to self-select into public housing and report a better health status score. The magic variable `HealthBehavior` measures this omitted variable, and you can use it as reference to make sure you get the models right (this is the same as "ability" in the examples in class), but don't include it in any of your actual models, since it's not real.
+
+This data includes four potential instruments:
+
+- `Supply`: Number of available public housing units in the city per 100 eligible households
+- `ParentsHealthStatus`: Health status of parents on a scale from 1 = poor to 5 = excellent
+- `WaitingTime`: Average waiting time before obtaining public housing in the city (in months)
+- `Stamp`: Dollar amount of food stamps (SNAP) spent each month
+
+You have three tasks:
+
+1. Evaluate the suitability of each of the four potential instruments. Check if they (1) have *relevance* with a scatterplot and model and F-test, (2) meet the *excludability* assumption, and (3) meet the *exogeneity* assumption. Choose one of these as your main instrument and justify why it's the best. Explain why the other three are not.
+
+2. Estimate a naive model of the effect of public housing on health status (i.e. without any instruments). You can include any control variables you feel appropriate (i.e. that fit in your causal model). If you use variables that are categorical like race, education, or marital status, make sure you wrap them with `as.factor()` to treat them as categories instead of numbers (e.g. `as.factor(education)`).
+
+3. Estimate the effect of public housing on health status using 2SLS IV. You can use `iv_robust()` to do it all in one step if you want (but you'll still need to run a first-stage model to find the F statistic). Compare the results with the naive model. Which model do you trust (if any), and why?
+
+```{r load-housing-data, message=FALSE}
+housing <- read_csv("data/public_housing.csv") %>% 
+  rename(HealthBehaviour = HealthBehavior)
+```
+
+### Sub-task 1: Assess instruments
+
+```{r}
+p1 <- ggplot(housing, aes(x = Supply, y = PublicHousing)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  theme_classic()
+p2 <- ggplot(housing, aes(x = ParentsHealthStatus, y = PublicHousing)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  theme_classic()
+p3 <- ggplot(housing, aes(x = WaitingTime, y = PublicHousing)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  theme_classic()
+p4 <- ggplot(housing, aes(x = Stamp, y = PublicHousing)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  theme_classic()
+grid.arrange(p1, p2, p3, p4, nrow = 2)
+```
+
+```{r}
+check_relevance <- lm(PublicHousing ~ Supply, data = housing)
+tidy(check_relevance)
+glance(check_relevance)
+
+check_relevance <- lm(PublicHousing ~ ParentsHealthStatus, data = housing)
+tidy(check_relevance)
+glance(check_relevance)
+
+check_relevance <- lm(PublicHousing ~ WaitingTime, data = housing)
+tidy(check_relevance)
+glance(check_relevance)
+
+check_relevance <- lm(PublicHousing ~ Stamp, data = housing)
+tidy(check_relevance)
+glance(check_relevance)
+```
+
+The output above indicates that the only proposed instrument that clearly meets the relevancy criteria is `WaitingTime`: it has a statistically significant coefficient and a F-statistic well above the conservative threshold of 104. `Stamp` fails both checks, `ParentsHealthStatus` has a statistically significant coefficient at the 1% level, but fails the F-statistic test. `Supply` has a statistically significant coefficient, but only meets the less-conservative F-statistic threshold of 10.0.
+
+```{r}
+p1 <- ggplot(housing, aes(x = Supply, y = HealthStatus)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  theme_classic()
+p2 <- ggplot(housing, aes(x = ParentsHealthStatus, y = HealthStatus)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  theme_classic()
+p3 <- ggplot(housing, aes(x = WaitingTime, y = HealthStatus)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  theme_classic()
+grid.arrange(p1, p2, p3, nrow = 2)
+```
+
+```{r}
+check_exclusion <- lm(HealthStatus ~ Supply, data = housing)
+tidy(check_exclusion)
+
+check_exclusion <- lm(HealthStatus ~ ParentsHealthStatus, data = housing)
+tidy(check_exclusion)
+
+check_exclusion <- lm(HealthStatus ~ WaitingTime, data = housing)
+tidy(check_exclusion)
+```
+
+Again, `WaitingTime` has the strongest relationship with `HealthStatus`. `Supply` and `ParentsHealthStatus` both have a statistically significant relationship at the 1% level. This means that the only two possibilities at this point are `Supply` and `WaitingTime`.
+
+At face value, there appears to be no direct link between the supply of public housing and the health status of the individual. Presumably, the argument is something along the lines of as the supply of public housing changes, the number of years spent in public housing would go up or down (for example, it would go up if supply went down as the individual couldn't be sure of getting another placement if they moved out of the current placement) and more health improvements are seen when individuals stay in public housing longer.
+
+However, I do see a direct link between the amount of time an individual spends waiting for a placement and their health given the hypothesised link between public housing and health for low-income individuals. That is, the longer an individual spends waiting for public housing, the more their health could deterioriate if they're living in sub-standard accommodation. This means that `WaitingTime` unfortunately violates the exclusion criteria.
+
+The final check is for exogeneity. Note that in a real dataset, we would be solely relying on a story and wouldn't actually be able to check the relationship between the proposed instrument/s and the magical `HealthBehaviour` variable.
+
+```{r}
+ggplot(housing, aes(x = HealthBehaviour, y = Supply)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  theme_classic()
+```
+
+```{r}
+check_exogeneity <- lm(Supply ~ HealthBehaviour, data = housing)
+tidy(check_exogeneity)
+```
+
+Given the coefficient isn't statistically significant, we can safely conclude that it satisfies the exogeneity criteria. However, in real life, we'd need to convince everyone that `Supply` wasn't correlated with any other variable in the model. I can see this being violated by a number of variables in the dataset including `Stamp`, `WaitingTime`, potentially `Race` etc. However, for the sake of the exercise, let's assume that `Supply` is a valid instrument and move on.
+
+### Sub-task 2: Naive model
+
+```{r}
+model_true <- lm(HealthStatus ~ PublicHousing + HealthBehaviour, data = housing)
+tidy(model_true)
+
+model_naive <- lm(HealthStatus ~ PublicHousing, data = housing)
+tidy(model_naive)
+
+model_naive_w_controls <- lm(HealthStatus ~ PublicHousing + Age + as.factor(Race) + as.factor(Education) + as.factor(MaritalStatus), data = housing)
+tidy(model_naive_w_controls)
+```
+
+The naive model overstates the true effect because of omitted variable bias/endogeneity, even when controls are introduced.
+
+### Sub-task 3: 2SLS estimation
+
+```{r}
+model_2sls <- iv_robust(HealthStatus ~ PublicHousing | Supply, data = housing, diagnostics = TRUE)
+summary(model_2sls)
+
+model_2sls2 <- iv_robust(HealthStatus ~ PublicHousing | WaitingTime, data = housing,
+                         diagnostics = TRUE)
+summary(model_2sls2)
+
+model_2sls3 <- iv_robust(HealthStatus ~ PublicHousing | Supply + WaitingTime, data = housing,
+                         diagnostics = TRUE)
+summary(model_2sls3)
+
+model_2sls_w_controls <- iv_robust(HealthStatus ~ PublicHousing + Age + as.factor(Race) +
+                                     as.factor(Education) + as.factor(MaritalStatus) | 
+                                     Supply + WaitingTime + Age + as.factor(Race) + 
+                                     as.factor(Education) + as.factor(MaritalStatus),
+                                   data = housing, diagnostics = TRUE)
+summary(model_2sls_w_controls)
+```
+
+In all cases we reject the null hypothesis for a weak instrument, which is good.
+
+```{r}
+modelsummary(list("True (Forbidden)" = model_true,
+                  "Naive" = model_naive,
+                  "Naive with controls" = model_naive_w_controls,
+                  "2SLS (Supply)" = model_2sls,
+                  "2SLS (Waiting Time)" = model_2sls2,
+                  "2SLS (Supply & Waiting Time)" = model_2sls3,
+                  "2SLS (Supply & Waiting Time) with controls" = model_2sls_w_controls
+                  ),
+             gof_omit = "IC|Log|Adj|p\\.value|statistic|se_type",
+             stars = TRUE) %>% 
+  row_spec(c(3), background = "steelblue")
+```
+
+Because we have the true effect, we know that using `Supply` and `WaitingTime` together in a 2SLS model produces an estimate closest to the true effect (albeit a slight underestimation). Using `Supply` alone overestimates the effect of `PublicHousing` on `HealthStatus` and `WaitingTime` along underestimates it. A naive model, even with controls, significantly overestimates the true effect. Either way, an extra year spent in public housing causes health to improve by about 22.6% on average.
+
