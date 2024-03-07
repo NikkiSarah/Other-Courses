@@ -1,0 +1,36 @@
+digraph {
+	"U
+Motivation" [pos="3,1.5!"]
+	"X
+GPS usage" [pos="0,0!"]
+	"Z
+Hippocampus volume" [pos="3,0!"]
+	"Y
+Spatial memory" [pos="6,0!"]
+	U_x [pos="0,-1.5!"]
+	U_z [pos="3,-1.5!"]
+	U_y [pos="6,-1.5!"]
+	"U
+Motivation" [style=dashed]
+	U_x [style=dashed]
+	U_z [style=dashed]
+	U_y [style=dashed]
+	"U
+Motivation" -> "X
+GPS usage"
+	"U
+Motivation" -> "Y
+Spatial memory"
+	"X
+GPS usage" -> "Z
+Hippocampus volume"
+	"Z
+Hippocampus volume" -> "Y
+Spatial memory"
+	U_x -> "X
+GPS usage" [style=dashed]
+	U_y -> "Y
+Spatial memory" [style=dashed]
+	U_z -> "Z
+Hippocampus volume" [style=dashed]
+}
